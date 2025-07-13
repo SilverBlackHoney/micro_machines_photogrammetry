@@ -2,12 +2,22 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 import open3d as o3d
+import logging
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 import os
 import matplotlib.pyplot as plt
 
 from dense_reconstruction import DenseReconstruction, CameraParameters, CameraPose
+
+# Configure logging
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 class EnhancedPhotogrammetryPipeline:
@@ -37,6 +47,9 @@ class EnhancedPhotogrammetryPipeline:
         
     def load_images(self) -> List[np.ndarray]:
         """Load all images from folder"""
+        # Clear existing images to prevent duplicates
+        self.images = []
+        
         image_files = [
             f for f in os.listdir(self.images_folder)
             if f.lower().endswith(('.jpg', '.jpeg', '.png'))
@@ -82,6 +95,9 @@ class EnhancedPhotogrammetryPipeline:
 
     def match_features(self, ratio_threshold=0.7):
         """Match features between all image pairs"""
+        # Clear existing matches to prevent stale data
+        self.matches = {}
+        
         matcher = cv2.BFMatcher()
 
         for i in range(len(self.images)):
@@ -105,8 +121,19 @@ class EnhancedPhotogrammetryPipeline:
 
     def estimate_camera_intrinsics(self, focal_length_guess=None):
         """Estimate camera intrinsic parameters"""
+        # Validate that all images have the same dimensions
         if len(self.images) == 0:
             raise ValueError("No images loaded")
+        
+        first_shape = self.images[0].shape
+        for idx, img in enumerate(self.images[1:], start=1):
+            if img.shape != first_shape:
+                raise ValueError(
+                    f"Image at index {idx} has shape {img.shape}, "
+                    f"which does not match the first image shape {first_shape}. "
+                    "All images must have the same dimensions for intrinsic estimation."
+                )
+        # TODO: Add logic to handle images of varying sizes if needed in the future.
 
         h, w = self.images[0].shape[:2]
         
