@@ -1,3 +1,4 @@
+
 import cv2
 import numpy as np
 from scipy.optimize import least_squares
@@ -26,23 +27,61 @@ class CameraPose:
 
 
 class PhotogrammetryPipeline:
+    """Photogrammetry pipeline for Structure from Motion (SfM)"""
+
     def __init__(self, images_folder: str):
+        if not os.path.exists(images_folder):
+            raise ValueError(f"Images folder does not exist: {images_folder}")
+
         self.images_folder = images_folder
         self.images = []
         self.keypoints = []
         self.descriptors = []
-        self.matches = {}
+        self.matches = {}  # Initialize matches to prevent KeyErrors
         self.camera_params = None
         self.camera_poses = {}
         self.point_cloud = []
         self.point_colors = []
-        # track_graph: Dict[int, Dict[str, Any]]
-        #   - key: track_id (int)
-        #   - value: {
-        #         'point_3d': np.ndarray,  # 3D coordinates of the point
-        #         'observations': Dict[int, int]  # {image_id: keypoint_index}
-        #     }
-        self.track_graph = {}  # 3D point tracks across images
+        self.track_graph = {}
+        self.depth_maps = {}
+
+    def _create_detector(self, feature_type='ORB', use_cuda=False):
+        """Create feature detector with proper CUDA handling"""
+        use_cuda_detector = False
+        detector_name = feature_type
+
+        if feature_type == 'SIFT':
+            if hasattr(cv2, 'SIFT_create'):
+                detector = cv2.SIFT_create(nfeatures=2000)
+                detector_name = "SIFT"
+            else:
+                raise ValueError("SIFT is not available in your OpenCV installation. Please install opencv-contrib-python.")
+        elif feature_type == 'ORB':
+            if use_cuda and hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                try:
+                    detector = cv2.cuda.ORB_create(nfeatures=2000)
+                    use_cuda_detector = True
+                    detector_name = "ORB (CUDA)"
+                except Exception:
+                    # Fallback to CPU if CUDA fails
+                    detector = cv2.ORB_create(nfeatures=2000)
+                    detector_name = "ORB (CPU fallback)"
+            else:
+                detector = cv2.ORB_create(nfeatures=2000)
+                detector_name = "ORB"
+        else:
+            raise ValueError(f"Unsupported feature type: {feature_type}")
+
+        return detector, use_cuda_detector, detector_name
+
+    def _get_matcher_for_descriptor(self, feature_type):
+        """Get appropriate matcher for descriptor type"""
+        if feature_type.upper() in ['SIFT', 'SURF']:
+            return cv2.BFMatcher(cv2.NORM_L2)
+        elif feature_type.upper() in ['ORB', 'BRISK', 'AKAZE']:
+            return cv2.BFMatcher(cv2.NORM_HAMMING)
+        else:
+            return cv2.BFMatcher(cv2.NORM_L2)  # Default fallback
 
     def load_images(self) -> List[np.ndarray]:
         """Load all images from folder"""
@@ -61,37 +100,30 @@ class PhotogrammetryPipeline:
         print(f"Loaded {len(self.images)} images")
         return self.images
 
-    def extract_features(self, feature_type='SIFT'):
+    def extract_features(self, feature_type='ORB', use_cuda=False):
         """Extract features from all images"""
-        if feature_type == 'SIFT':
-            if hasattr(cv2, 'SIFT_create'):
-                detector = cv2.SIFT_create(nfeatures=2000)
-            else:
-                raise ValueError(
-                    "SIFT is not available in your OpenCV installation. "
-                    "Please install opencv-contrib-python."
-                )
-        elif feature_type == 'ORB':
-            if hasattr(cv2, 'ORB_create'):
-                detector = cv2.ORB_create(nfeatures=2000)
-            else:
-                raise ValueError(
-                    "ORB is not available in your OpenCV installation."
-                )
-        else:
-            raise ValueError(f"Unsupported feature type: {feature_type}")
+        detector, use_cuda_detector, detector_name = self._create_detector(feature_type, use_cuda)
 
         for img in self.images:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            kps, descs = detector.detectAndCompute(gray, None)
+            if use_cuda_detector:
+                gpu_img = cv2.cuda_GpuMat()
+                gpu_img.upload(gray)
+                kps = detector.detect(gpu_img)
+                kps, descs = detector.compute(gpu_img, kps)
+                descs = descs.download() if descs is not None else None
+                # Release GPU memory
+                del gpu_img
+            else:
+                kps, descs = detector.detectAndCompute(gray, None)
             self.keypoints.append(kps)
             self.descriptors.append(descs)
 
-        print(f"Extracted features from {len(self.images)} images")
+        print(f"Extracted features from {len(self.images)} images using {detector_name}")
 
-    def match_features(self, ratio_threshold=0.7):
+    def match_features(self, feature_type='ORB', ratio_threshold=0.7):
         """Match features between all image pairs"""
-        matcher = cv2.BFMatcher()
+        matcher = self._get_matcher_for_descriptor(feature_type)
 
         for i in range(len(self.images)):
             for j in range(i + 1, len(self.images)):
@@ -180,9 +212,6 @@ class PhotogrammetryPipeline:
         if self.camera_params is None:
             self.estimate_camera_intrinsics()
 
-        # Ensure camera intrinsics are estimated
-        if self.camera_params is None:
-            self.estimate_camera_intrinsics()
         K = np.array([
             [self.camera_params.focal_length, 0, self.camera_params.principal_point[0]],
             [0, self.camera_params.focal_length, self.camera_params.principal_point[1]],
@@ -280,7 +309,8 @@ class PhotogrammetryPipeline:
         params,
         observations,
         point_indices,
-        camera_indices
+        camera_indices,
+        img_ids
     ):
         """Compute residuals for bundle adjustment"""
         n_cameras = len(self.camera_poses)
@@ -304,20 +334,27 @@ class PhotogrammetryPipeline:
             tvec = camera_params[cam_idx][3:]
 
             # Project 3D point
-            projected, _ = cv2.projectPoints(
-                points_3d[point_idx].reshape(1, 1, 3),
-                rvec, tvec, K, None
-            )
-
-            # Compute residual
-            residual = obs - projected[0, 0]
-            residuals.extend(residual)
+            try:
+                projected, _ = cv2.projectPoints(
+                    points_3d[point_idx].reshape(1, 1, 3),
+                    rvec, tvec, K, None
+                )
+                # Compute residual
+                residual = obs - projected[0, 0]
+                residuals.extend(residual)
+            except cv2.error:
+                # If projection fails, add large residual
+                residuals.extend([100.0, 100.0])
 
         return np.array(residuals)
 
     def run_bundle_adjustment(self, max_iterations=50):
         """Run bundle adjustment optimization"""
         print("Running bundle adjustment...")
+
+        # Create mapping from image_id to sequential index
+        img_ids = sorted(self.camera_poses.keys())
+        id_to_idx = {img_id: idx for idx, img_id in enumerate(img_ids)}
 
         # Prepare observations
         observations = []
@@ -330,7 +367,7 @@ class PhotogrammetryPipeline:
                     kp = self.keypoints[img_id][kp_idx]
                     observations.append([kp.pt[0], kp.pt[1]])
                     point_indices.append(track_id)
-                    camera_indices.append(img_id)
+                    camera_indices.append(id_to_idx[img_id])
 
         observations = np.array(observations)
 
@@ -339,14 +376,14 @@ class PhotogrammetryPipeline:
         n_points = len(self.point_cloud)
 
         camera_params = []
-        for img_id in sorted(self.camera_poses.keys()):
+        for img_id in img_ids:
             pose = self.camera_poses[img_id]
             # Ensure pose.rotation is a valid 3x3 rotation matrix
             rot = pose.rotation
             if rot.shape != (3, 3):
                 print(f"Warning: pose.rotation for image {img_id} is not 3x3, skipping.")
                 continue
-            # Optionally, orthonormalize the rotation matrix if needed
+            # Orthonormalize the rotation matrix
             u, _, vh = np.linalg.svd(rot)
             rot_ortho = u @ vh
             if np.linalg.det(rot_ortho) < 0:
@@ -367,16 +404,36 @@ class PhotogrammetryPipeline:
             result = least_squares(
                 self.bundle_adjustment_residuals,
                 initial_params,
-                args=(observations, point_indices, camera_indices),
+                args=(observations, point_indices, camera_indices, img_ids),
                 max_nfev=max_iterations * len(initial_params)
             )
 
             if result.success:
-                print(
-                    f"Bundle adjustment converged in {result.nfev} iterations"
-                )
+                print(f"Bundle adjustment converged in {result.nfev} iterations")
+
                 # Update camera poses and points from optimized parameters
-                # (Implementation details omitted for brevity)
+                optimized_camera_params = result.x[:n_cameras * 6].reshape((n_cameras, 6))
+                optimized_points = result.x[n_cameras * 6:].reshape((n_points, 3))
+
+                # Update camera poses
+                for i, img_id in enumerate(img_ids):
+                    rvec = optimized_camera_params[i][:3]
+                    tvec = optimized_camera_params[i][3:]
+                    R, _ = cv2.Rodrigues(rvec)
+                    self.camera_poses[img_id] = CameraPose(
+                        rotation=R,
+                        translation=tvec,
+                        image_id=img_id
+                    )
+
+                # Update point cloud
+                self.point_cloud = optimized_points.tolist()
+
+                # Update track graph
+                for track_id, new_point in enumerate(optimized_points):
+                    if track_id in self.track_graph:
+                        self.track_graph[track_id]['point_3d'] = new_point
+
             else:
                 print("Bundle adjustment failed to converge")
 
@@ -439,7 +496,9 @@ class PhotogrammetryPipeline:
         neighbors.sort(key=lambda x: x[1], reverse=True)
         return [n[0] for n in neighbors[:max_neighbors]]
 
-    def plane_sweep_stereo(self, ref_img_id: int, neighbor_ids: List[int]) -> Optional[np.ndarray]:
+    def plane_sweep_stereo(self, ref_img_id: int, neighbor_ids: List[int], 
+                          min_depth: float = 0.1, max_depth: float = 1.0, 
+                          num_planes: int = 64) -> Optional[np.ndarray]:
         """Compute depth map using plane sweeping stereo"""
         if ref_img_id not in self.camera_poses:
             return None
@@ -448,10 +507,7 @@ class PhotogrammetryPipeline:
         ref_pose = self.camera_poses[ref_img_id]
         h, w = ref_img.shape[:2]
 
-        # Define depth planes (adjust range for micro machines - typically 10cm to 1m)
-        min_depth = 0.1  # 10cm
-        max_depth = 1.0  # 1m
-        num_planes = 64
+        # Define depth planes with configurable range
         depths = np.linspace(min_depth, max_depth, num_planes)
 
         # Camera matrix
@@ -531,6 +587,10 @@ class PhotogrammetryPipeline:
 
         transformed_points = (R_rel @ points_3d.T).T + t_rel
 
+        # Check for points behind camera
+        if np.any(transformed_points[:, 2] <= 0):
+            return None
+
         # Project to source image
         projected = (K @ transformed_points.T).T
         projected = projected[:, :2] / projected[:, 2:3]
@@ -539,7 +599,7 @@ class PhotogrammetryPipeline:
         map_x = projected[:, 0].reshape(h, w).astype(np.float32)
         map_y = projected[:, 1].reshape(h, w).astype(np.float32)
 
-        # Mask or clip out-of-bounds and invalid coordinates
+        # Clip out-of-bounds and invalid coordinates
         map_x = np.clip(map_x, 0, w - 1)
         map_y = np.clip(map_y, 0, h - 1)
         map_x[np.isnan(map_x) | np.isinf(map_x)] = 0
@@ -563,19 +623,23 @@ class PhotogrammetryPipeline:
         sqr1 = cv2.filter2D(img1 ** 2, -1, kernel)
         sqr2 = cv2.filter2D(img2 ** 2, -1, kernel)
 
-        std1 = np.sqrt(np.maximum(sqr1 - mean1 ** 2, 0))
-        std2 = np.sqrt(np.maximum(sqr2 - mean2 ** 2, 0))
+        std1 = np.sqrt(np.maximum(sqr1 - mean1 ** 2, 1e-8))  # Avoid sqrt(0)
+        std2 = np.sqrt(np.maximum(sqr2 - mean2 ** 2, 1e-8))
 
         # Compute correlation
         correlation = cv2.filter2D(img1 * img2, -1, kernel) - mean1 * mean2
 
-        # Normalize
+        # Normalize with safety check
         denominator = std1 * std2
+        eps = 1e-8
         ncc = np.divide(
-            correlation, denominator, out=np.zeros_like(correlation), where=denominator != 0
+            correlation, 
+            np.maximum(denominator, eps), 
+            out=np.zeros_like(correlation)
         )
 
-        # Convert to cost (1 - NCC)
+        # Clip to valid range and convert to cost
+        ncc = np.clip(ncc, -1, 1)
         return 1 - ncc
 
     def filter_depth_map(self, depth_map: np.ndarray) -> np.ndarray:
@@ -706,38 +770,105 @@ class PhotogrammetryPipeline:
         o3d.io.write_point_cloud(filename, point_cloud)
         print(f"Exported point cloud to {filename}")
 
-    def run_sfm_pipeline(self):
+    def run_sfm_pipeline(self, feature_type='ORB', use_cuda=False):
         """Run the complete SfM pipeline"""
         print("Starting SfM pipeline...")
-
-        # Step 1: Load images
         self.load_images()
         if len(self.images) < 2:
             raise ValueError("Need at least 2 images for reconstruction")
-
-        # Step 2: Extract features
-        self.extract_features()
-
-        # Step 3: Match features
-        self.match_features()
-
-        # Step 4: Estimate camera intrinsics
+        self.extract_features(feature_type=feature_type, use_cuda=use_cuda)
+        self.match_features(feature_type=feature_type)
         self.estimate_camera_intrinsics()
-
-        # Step 5: Initialize two-view reconstruction
         self.initialize_two_view_reconstruction()
-
-        # Step 6: Bundle adjustment
         self.run_bundle_adjustment()
-
-        # Step 7: Export results
         self.export_point_cloud("reconstruction.ply")
+        print("SfM pipeline completed successfully!")
+        return len(self.camera_poses), len(self.point_cloud)
 
-        # Return number of poses and points
-        n_poses = len(self.camera_poses)
-        n_points = len(self.point_cloud)
-        print(f"SfM completed: {n_poses} poses, {n_points} sparse points")
-        return n_poses, n_points
+    def add_image_incremental(self, img_path, feature_type='ORB', use_cuda=False):
+        """Add a new image incrementally, extract features, and match to existing images."""
+        img = cv2.imread(img_path)
+        if img is None:
+            raise ValueError(f"Could not read image: {img_path}")
+        self.images.append(img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Feature extraction using helper method
+        detector, use_cuda_detector, detector_name = self._create_detector(feature_type, use_cuda)
+
+        if use_cuda_detector:
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(gray)
+            kps = detector.detect(gpu_img)
+            kps, descs = detector.compute(gpu_img, kps)
+            descs = descs.download() if descs is not None else None
+            # Release GPU memory
+            del gpu_img
+        else:
+            kps, descs = detector.detectAndCompute(gray, None)
+
+        self.keypoints.append(kps)
+        self.descriptors.append(descs)
+
+        # Match to all previous images with proper matcher
+        matcher = self._get_matcher_for_descriptor(feature_type)
+        new_idx = len(self.images) - 1
+        for i in range(new_idx):
+            if self.descriptors[i] is not None and descs is not None:
+                raw_matches = matcher.knnMatch(self.descriptors[i], descs, k=2)
+                # Apply Lowe's ratio test
+                good_matches = []
+                for match_pair in raw_matches:
+                    if len(match_pair) == 2:
+                        m, n = match_pair
+                        if m.distance < 0.7 * n.distance:
+                            good_matches.append(m)
+                self.matches[(i, new_idx)] = good_matches
+
+        print(f"Added image {img_path} incrementally. Features extracted and matched.")
+
+    def incremental_sfm_update(self):
+        """Update the reconstruction incrementally after adding a new image."""
+        # Find the new image index
+        new_idx = len(self.images) - 1
+        # Find the best match to existing cameras
+        best_score = 0
+        best_pair = None
+        for i in range(new_idx):
+            matches = self.matches.get((i, new_idx), [])
+            if len(matches) > best_score:
+                best_score = len(matches)
+                best_pair = (i, new_idx)
+        if best_pair is None:
+            print("No valid matches for incremental SfM update.")
+            return
+        # Estimate pose for the new image
+        img1_idx, img2_idx = best_pair
+        matches = self.matches[best_pair]
+        pts1 = np.array([self.keypoints[img1_idx][m.queryIdx].pt for m in matches])
+        pts2 = np.array([self.keypoints[img2_idx][m.trainIdx].pt for m in matches])
+        if self.camera_params is None:
+            self.estimate_camera_intrinsics()
+        K = np.array([
+            [self.camera_params.focal_length, 0, self.camera_params.principal_point[0]],
+            [0, self.camera_params.focal_length, self.camera_params.principal_point[1]],
+            [0, 0, 1]
+        ])
+        E, mask = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC)
+        _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K)
+        # Add new camera pose
+        self.camera_poses[img2_idx] = CameraPose(
+            rotation=R,
+            translation=t.flatten(),
+            image_id=img2_idx
+        )
+        # Triangulate new points
+        points_3d = self.triangulate_points(img1_idx, img2_idx, self.camera_poses[img1_idx], self.camera_poses[img2_idx])
+        if points_3d.shape[0] > 0:
+            if not hasattr(self, 'point_cloud') or self.point_cloud is None:
+                self.point_cloud = []
+            self.point_cloud.extend(points_3d.tolist())
+        print(f"Incremental SfM update complete for image {img2_idx}. New points: {points_3d.shape[0]}")
 
     def run_complete_pipeline(self):
         """Run the complete photogrammetry pipeline including dense reconstruction"""
@@ -755,20 +886,20 @@ class PhotogrammetryPipeline:
 
             # Step 9: Generate mesh (optional)
             mesh = None
-            if hasattr(self, 'dense_point_cloud') and len(self.dense_point_cloud) > 0:
+            if len(dense_points) > 0:
                 try:
-                    mesh = self.generate_mesh("race_track_mesh.ply")
+                    mesh = self.generate_mesh("reconstruction_mesh.ply")
                     if mesh is not None:
                         print(f"Generated mesh with {len(mesh.vertices)} vertices")
                 except Exception as e:
                     print(f"Mesh generation failed: {e}")
 
             # Step 10: Export dense point cloud
-            if hasattr(self, 'dense_point_cloud') and len(self.dense_point_cloud) > 0:
-                self.export_point_cloud("race_track_dense.ply")
-                print(f"Generated dense point cloud with {len(self.dense_point_cloud)} points")
+            if len(dense_points) > 0:
+                self.export_point_cloud("dense_reconstruction.ply")
+                print(f"Generated dense point cloud with {len(dense_points)} points")
 
-            return mesh, (self.dense_point_cloud if hasattr(self, 'dense_point_cloud') else None)
+            return mesh, (dense_points if len(dense_points) > 0 else None)
 
         except Exception as e:
             print(f"Pipeline failed: {e}")
@@ -777,18 +908,51 @@ class PhotogrammetryPipeline:
 
 # Usage example for micro machines race track
 if __name__ == "__main__":
-    # Initialize pipeline
-    pipeline = PhotogrammetryPipeline("path/to/race_track_images")
+    import argparse
 
-    # Run complete pipeline with dense reconstruction
-    mesh, dense_points = pipeline.run_complete_pipeline()
+    parser = argparse.ArgumentParser(description='Run photogrammetry pipeline')
+    parser.add_argument('images_folder', help='Path to folder containing images')
+    parser.add_argument('--feature_type', default='ORB', choices=['SIFT', 'ORB'],
+                        help='Feature detector type')
+    parser.add_argument('--use_cuda', action='store_true',
+                        help='Use CUDA for ORB feature extraction (if available)')
+    parser.add_argument('--focal_length', type=float, default=None,
+                        help='Initial focal length guess')
+    parser.add_argument('--dense', action='store_true',
+                        help='Run dense reconstruction')
 
-    # Print results
-    if dense_points is not None:
-        print(f"Generated dense point cloud with {len(dense_points)} points")
-    print(f"Estimated {len(pipeline.camera_poses)} camera poses")
+    args = parser.parse_args()
 
-    # Optional: Visualize results
+    try:
+        # Initialize pipeline
+        pipeline = PhotogrammetryPipeline(args.images_folder)
+
+        if args.dense:
+            # Run complete pipeline with dense reconstruction
+            mesh, dense_points = pipeline.run_complete_pipeline()
+
+            # Print results
+            if dense_points is not None:
+                print(f"Generated dense point cloud with {len(dense_points)} points")
+            if mesh is not None:
+                print(f"Generated mesh successfully")
+            print(f"Estimated {len(pipeline.camera_poses)} camera poses")
+
+        else:
+            # Run only SfM pipeline
+            n_poses, n_points = pipeline.run_sfm_pipeline(feature_type=args.feature_type, use_cuda=args.use_cuda)
+            print(f"SfM completed: {n_poses} poses, {n_points} sparse points")
+
+    except Exception as e:
+        print(f"Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Optional: Visualize results (uncomment to use)
     # import open3d as o3d
-    # mesh = o3d.io.read_triangle_mesh("race_track_mesh.ply")
-    # o3d.visualization.draw_geometries([mesh])
+    # if os.path.exists("reconstruction.ply"):
+    #     pcd = o3d.io.read_point_cloud("reconstruction.ply")
+    #     o3d.visualization.draw_geometries([pcd])
+    # if os.path.exists("reconstruction_mesh.ply"):
+    #     mesh = o3d.io.read_triangle_mesh("reconstruction_mesh.ply")
+    #     o3d.visualization.draw_geometries([mesh])
