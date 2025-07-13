@@ -1,0 +1,133 @@
+Please address the comments from this code review:
+## Overall Comments
+- Consider refactoring the ORB/SIFT detector initialization (including CUDA fallback) into a shared helper to remove duplication between extract_features and add_image_incremental.
+- Make sure to initialize attributes like self.matches (and any other incremental data structures) in the constructor to prevent potential KeyErrors when matching new images.
+- The current use of a 'use_cuda_detector' flag via locals() is brittle—explicitly manage this flag and release GPU resources after use to avoid memory‐leaks and improve readability.
+
+## Individual Comments
+
+### Comment 1
+<location> `src/photogrammetry_v2.py:95` </location>
+<code_context>
+         for img in self.images:
+             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+-            kps, descs = detector.detectAndCompute(gray, None)
++            if feature_type == 'ORB' and use_cuda and 'use_cuda_detector' in locals() and use_cuda_detector:
++                gpu_img = cv2.cuda_GpuMat()
++                gpu_img.upload(gray)
+</code_context>
+
+<issue_to_address>
+Checking 'use_cuda_detector' in locals() is fragile.
+
+It's safer to ensure 'use_cuda_detector' is always defined before this check, or refactor the logic to avoid relying on 'locals()'.
+</issue_to_address>
+
+### Comment 2
+<location> `src/photogrammetry_v2.py:107` </location>
+<code_context>
+             self.descriptors.append(descs)
+
+-        print(f"Extracted features from {len(self.images)} images")
++        print(f"Extracted features from {len(self.images)} images using {feature_type}{' (CUDA)' if feature_type == 'ORB' and use_cuda else ''}")
+
+     def match_features(self, ratio_threshold=0.7):
+</code_context>
+
+<issue_to_address>
+String formatting for CUDA status may be misleading if CUDA is requested but not used.
+
+Currently, the message adds ' (CUDA)' based on use_cuda, not on whether CUDA was actually used. Please update the message to reflect the actual detector in use.
+
+Suggested implementation:
+
+```python
+        print(f"Extracted features from {len(self.images)} images using {detector_name}")
+
+```
+
+You will need to ensure that a variable `detector_name` is set appropriately before this print statement. For example, after detector selection:
+
+```python
+if feature_type == 'ORB':
+    if use_cuda and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+        detector = cv2.cuda_ORB.create()
+        detector_name = "ORB (CUDA)"
+    else:
+        detector = cv2.ORB_create()
+        detector_name = "ORB"
+# ... handle other feature types similarly
+```
+
+Make sure `detector_name` is available in the scope of the print statement.
+</issue_to_address>
+
+### Comment 3
+<location> `src/photogrammetry_v2.py:810` </location>
+<code_context>
++        self.keypoints.append(kps)
++        self.descriptors.append(descs)
++        # Match to all previous images
++        matcher = cv2.BFMatcher()
++        new_idx = len(self.images) - 1
++        for i in range(new_idx):
+</code_context>
+
+<issue_to_address>
+BFMatcher may not be optimal for all descriptor types.
+
+Specify the norm type in BFMatcher according to the descriptor (e.g., NORM_L2 for SIFT, NORM_HAMMING for ORB) to ensure correct matching.
+</issue_to_address>
+
+<suggested_fix>
+<<<<<<< SEARCH
+        self.keypoints.append(kps)
+        self.descriptors.append(descs)
+        # Match to all previous images
+        matcher = cv2.BFMatcher()
+        new_idx = len(self.images) - 1
+=======
+        self.keypoints.append(kps)
+        self.descriptors.append(descs)
+        # Match to all previous images
+
+        # Determine norm type based on descriptor
+        if hasattr(detector, 'descriptorType'):
+            descriptor_type = detector.descriptorType()
+        elif hasattr(detector, 'name'):
+            descriptor_type = detector.name
+        else:
+            descriptor_type = type(detector).__name__.lower()
+
+        if 'sift' in str(descriptor_type).lower() or 'surf' in str(descriptor_type).lower():
+            norm_type = cv2.NORM_L2
+        elif 'orb' in str(descriptor_type).lower() or 'brisk' in str(descriptor_type).lower() or 'akaze' in str(descriptor_type).lower():
+            norm_type = cv2.NORM_HAMMING
+        else:
+            norm_type = cv2.NORM_L2  # Default fallback
+
+        matcher = cv2.BFMatcher(norm_type)
+        new_idx = len(self.images) - 1
+>>>>>>> REPLACE
+
+</suggested_fix>
+
+### Comment 4
+<location> `src/photogrammetry_v2.py:862` </location>
+<code_context>
++        )
++        # Triangulate new points
++        points_3d = self.triangulate_points(img1_idx, img2_idx, self.camera_poses[img1_idx], self.camera_poses[img2_idx])
++        if points_3d.shape[0] > 0:
++            if not hasattr(self, 'point_cloud') or self.point_cloud is None:
++                self.point_cloud = []
++            self.point_cloud.extend(points_3d.tolist())
++        print(f"Incremental SfM update complete for image {img2_idx}. New points: {points_3d.shape[0]}")
++
+</code_context>
+
+<issue_to_address>
+Extending point_cloud with lists may lead to inconsistent data types.
+
+Standardize self.point_cloud to a single data type to avoid structural inconsistencies when extending it with lists.
+</issue_to_address>
