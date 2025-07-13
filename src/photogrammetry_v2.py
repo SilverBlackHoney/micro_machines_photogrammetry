@@ -26,26 +26,61 @@ class CameraPose:
 
 
 class PhotogrammetryPipeline:
+    """Photogrammetry pipeline for Structure from Motion (SfM)"""
+
     def __init__(self, images_folder: str):
         if not os.path.exists(images_folder):
             raise ValueError(f"Images folder does not exist: {images_folder}")
-        
+
         self.images_folder = images_folder
         self.images = []
         self.keypoints = []
         self.descriptors = []
-        self.matches = {}
+        self.matches = {}  # Initialize matches to prevent KeyErrors
         self.camera_params = None
         self.camera_poses = {}
         self.point_cloud = []
         self.point_colors = []
-        # track_graph: Dict[int, Dict[str, Any]]
-        #   - key: track_id (int)
-        #   - value: {
-        #         'point_3d': np.ndarray,  # 3D coordinates of the point
-        #         'observations': Dict[int, int]  # {image_id: keypoint_index}
-        #     }
-        self.track_graph = {}  # 3D point tracks across images
+        self.track_graph = {}
+        self.depth_maps = {}
+
+    def _create_detector(self, feature_type='ORB', use_cuda=False):
+        """Create feature detector with proper CUDA handling"""
+        use_cuda_detector = False
+        detector_name = feature_type
+
+        if feature_type == 'SIFT':
+            if hasattr(cv2, 'SIFT_create'):
+                detector = cv2.SIFT_create(nfeatures=2000)
+                detector_name = "SIFT"
+            else:
+                raise ValueError("SIFT is not available in your OpenCV installation. Please install opencv-contrib-python.")
+        elif feature_type == 'ORB':
+            if use_cuda and hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                try:
+                    detector = cv2.cuda.ORB_create(nfeatures=2000)
+                    use_cuda_detector = True
+                    detector_name = "ORB (CUDA)"
+                except Exception:
+                    # Fallback to CPU if CUDA fails
+                    detector = cv2.ORB_create(nfeatures=2000)
+                    detector_name = "ORB (CPU fallback)"
+            else:
+                detector = cv2.ORB_create(nfeatures=2000)
+                detector_name = "ORB"
+        else:
+            raise ValueError(f"Unsupported feature type: {feature_type}")
+
+        return detector, use_cuda_detector, detector_name
+
+    def _get_matcher_for_descriptor(self, feature_type):
+        """Get appropriate matcher for descriptor type"""
+        if feature_type.upper() in ['SIFT', 'SURF']:
+            return cv2.BFMatcher(cv2.NORM_L2)
+        elif feature_type.upper() in ['ORB', 'BRISK', 'AKAZE']:
+            return cv2.BFMatcher(cv2.NORM_HAMMING)
+        else:
+            return cv2.BFMatcher(cv2.NORM_L2)  # Default fallback
 
     def load_images(self) -> List[np.ndarray]:
         """Load all images from folder"""
@@ -65,50 +100,29 @@ class PhotogrammetryPipeline:
         return self.images
 
     def extract_features(self, feature_type='ORB', use_cuda=False):
-        """Extract features from all images, optionally using CUDA for ORB."""
-        if feature_type == 'SIFT':
-            if hasattr(cv2, 'SIFT_create'):
-                detector = cv2.SIFT_create(nfeatures=2000)
-            else:
-                raise ValueError(
-                    "SIFT is not available in your OpenCV installation. "
-                    "Please install opencv-contrib-python."
-                )
-        elif feature_type == 'ORB':
-            if use_cuda and hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'ORB_create'):
-                detector = cv2.cuda.ORB_create(nfeatures=2000)
-                use_cuda_detector = True
-            elif hasattr(cv2, 'ORB_create'):
-                detector = cv2.ORB_create(nfeatures=2000)
-                use_cuda_detector = False
-            else:
-                raise ValueError(
-                    "ORB is not available in your OpenCV installation."
-                )
-        else:
-            raise ValueError(f"Unsupported feature type: {feature_type}")
+        """Extract features from all images"""
+        detector, use_cuda_detector, detector_name = self._create_detector(feature_type, use_cuda)
 
-        self.keypoints = []
-        self.descriptors = []
         for img in self.images:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            if feature_type == 'ORB' and use_cuda and 'use_cuda_detector' in locals() and use_cuda_detector:
+            if use_cuda_detector:
                 gpu_img = cv2.cuda_GpuMat()
                 gpu_img.upload(gray)
                 kps = detector.detect(gpu_img)
                 kps, descs = detector.compute(gpu_img, kps)
-                kps = [cv2.KeyPoint(x.pt[0], x.pt[1], x.size, x.angle, x.response, x.octave, x.class_id) for x in kps]
-                descs = descs.download() if hasattr(descs, 'download') else descs
+                descs = descs.download() if descs is not None else None
+                # Release GPU memory
+                del gpu_img
             else:
                 kps, descs = detector.detectAndCompute(gray, None)
             self.keypoints.append(kps)
             self.descriptors.append(descs)
 
-        print(f"Extracted features from {len(self.images)} images using {feature_type}{' (CUDA)' if feature_type == 'ORB' and use_cuda else ''}")
+        print(f"Extracted features from {len(self.images)} images using {detector_name}")
 
-    def match_features(self, ratio_threshold=0.7):
+    def match_features(self, feature_type='ORB', ratio_threshold=0.7):
         """Match features between all image pairs"""
-        matcher = cv2.BFMatcher()
+        matcher = self._get_matcher_for_descriptor(feature_type)
 
         for i in range(len(self.images)):
             for j in range(i + 1, len(self.images)):
@@ -395,11 +409,11 @@ class PhotogrammetryPipeline:
 
             if result.success:
                 print(f"Bundle adjustment converged in {result.nfev} iterations")
-                
+
                 # Update camera poses and points from optimized parameters
                 optimized_camera_params = result.x[:n_cameras * 6].reshape((n_cameras, 6))
                 optimized_points = result.x[n_cameras * 6:].reshape((n_points, 3))
-                
+
                 # Update camera poses
                 for i, img_id in enumerate(img_ids):
                     rvec = optimized_camera_params[i][:3]
@@ -410,15 +424,15 @@ class PhotogrammetryPipeline:
                         translation=tvec,
                         image_id=img_id
                     )
-                
+
                 # Update point cloud
                 self.point_cloud = optimized_points.tolist()
-                
+
                 # Update track graph
                 for track_id, new_point in enumerate(optimized_points):
                     if track_id in self.track_graph:
                         self.track_graph[track_id]['point_3d'] = new_point
-                        
+
             else:
                 print("Bundle adjustment failed to converge")
 
@@ -762,7 +776,7 @@ class PhotogrammetryPipeline:
         if len(self.images) < 2:
             raise ValueError("Need at least 2 images for reconstruction")
         self.extract_features(feature_type=feature_type, use_cuda=use_cuda)
-        self.match_features()
+        self.match_features(feature_type=feature_type)
         self.estimate_camera_intrinsics()
         self.initialize_two_view_reconstruction()
         self.run_bundle_adjustment()
@@ -777,49 +791,39 @@ class PhotogrammetryPipeline:
             raise ValueError(f"Could not read image: {img_path}")
         self.images.append(img)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Feature extraction
-        if feature_type == 'SIFT':
-            if hasattr(cv2, 'SIFT_create'):
-                detector = cv2.SIFT_create(nfeatures=2000)
-            else:
-                raise ValueError("SIFT is not available in your OpenCV installation. Please install opencv-contrib-python.")
-            use_cuda_detector = False
-        elif feature_type == 'ORB':
-            if use_cuda and hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'ORB_create'):
-                detector = cv2.cuda.ORB_create(nfeatures=2000)
-                use_cuda_detector = True
-            elif hasattr(cv2, 'ORB_create'):
-                detector = cv2.ORB_create(nfeatures=2000)
-                use_cuda_detector = False
-            else:
-                raise ValueError("ORB is not available in your OpenCV installation.")
-        else:
-            raise ValueError(f"Unsupported feature type: {feature_type}")
-        if feature_type == 'ORB' and use_cuda and use_cuda_detector:
+
+        # Feature extraction using helper method
+        detector, use_cuda_detector, detector_name = self._create_detector(feature_type, use_cuda)
+
+        if use_cuda_detector:
             gpu_img = cv2.cuda_GpuMat()
             gpu_img.upload(gray)
             kps = detector.detect(gpu_img)
             kps, descs = detector.compute(gpu_img, kps)
-            kps = [cv2.KeyPoint(x.pt[0], x.pt[1], x.size, x.angle, x.response, x.octave, x.class_id) for x in kps]
-            descs = descs.download() if hasattr(descs, 'download') else descs
+            descs = descs.download() if descs is not None else None
+            # Release GPU memory
+            del gpu_img
         else:
             kps, descs = detector.detectAndCompute(gray, None)
+
         self.keypoints.append(kps)
         self.descriptors.append(descs)
-        # Match to all previous images
-        matcher = cv2.BFMatcher()
+
+        # Match to all previous images with proper matcher
+        matcher = self._get_matcher_for_descriptor(feature_type)
         new_idx = len(self.images) - 1
         for i in range(new_idx):
             if self.descriptors[i] is not None and descs is not None:
                 raw_matches = matcher.knnMatch(self.descriptors[i], descs, k=2)
+                # Apply Lowe's ratio test
                 good_matches = []
                 for match_pair in raw_matches:
                     if len(match_pair) == 2:
                         m, n = match_pair
                         if m.distance < 0.7 * n.distance:
                             good_matches.append(m)
-                if len(good_matches) > 20:
-                    self.matches[(i, new_idx)] = good_matches
+                self.matches[(i, new_idx)] = good_matches
+
         print(f"Added image {img_path} incrementally. Features extracted and matched.")
 
     def incremental_sfm_update(self):
@@ -868,17 +872,17 @@ class PhotogrammetryPipeline:
     def run_complete_pipeline(self):
         """Run the complete photogrammetry pipeline including dense reconstruction"""
         print("Starting complete photogrammetry pipeline...")
-        
+
         try:
             # Step 1-6: Basic SfM pipeline
             n_poses, n_points = self.run_sfm_pipeline()
-            
+
             # Step 7: Dense reconstruction
             self.compute_depth_maps()
-            
+
             # Step 8: Fuse depth maps
             dense_points = self.fuse_depth_maps()
-            
+
             # Step 9: Generate mesh (optional)
             mesh = None
             if len(dense_points) > 0:
@@ -888,14 +892,14 @@ class PhotogrammetryPipeline:
                         print(f"Generated mesh with {len(mesh.vertices)} vertices")
                 except Exception as e:
                     print(f"Mesh generation failed: {e}")
-            
+
             # Step 10: Export dense point cloud
             if len(dense_points) > 0:
                 self.export_point_cloud("dense_reconstruction.ply")
                 print(f"Generated dense point cloud with {len(dense_points)} points")
-            
+
             return mesh, (dense_points if len(dense_points) > 0 else None)
-            
+
         except Exception as e:
             print(f"Pipeline failed: {e}")
             return None, None
@@ -904,7 +908,7 @@ class PhotogrammetryPipeline:
 # Usage example for micro machines race track
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='Run photogrammetry pipeline')
     parser.add_argument('images_folder', help='Path to folder containing images')
     parser.add_argument('--feature_type', default='ORB', choices=['SIFT', 'ORB'],
@@ -915,34 +919,34 @@ if __name__ == "__main__":
                         help='Initial focal length guess')
     parser.add_argument('--dense', action='store_true',
                         help='Run dense reconstruction')
-    
+
     args = parser.parse_args()
-    
+
     try:
         # Initialize pipeline
         pipeline = PhotogrammetryPipeline(args.images_folder)
-        
+
         if args.dense:
             # Run complete pipeline with dense reconstruction
             mesh, dense_points = pipeline.run_complete_pipeline()
-            
+
             # Print results
             if dense_points is not None:
                 print(f"Generated dense point cloud with {len(dense_points)} points")
             if mesh is not None:
                 print(f"Generated mesh successfully")
             print(f"Estimated {len(pipeline.camera_poses)} camera poses")
-            
+
         else:
             # Run only SfM pipeline
             n_poses, n_points = pipeline.run_sfm_pipeline(feature_type=args.feature_type, use_cuda=args.use_cuda)
             print(f"SfM completed: {n_poses} poses, {n_points} sparse points")
-            
+
     except Exception as e:
         print(f"Pipeline failed: {e}")
         import traceback
         traceback.print_exc()
-        
+
     # Optional: Visualize results (uncomment to use)
     # import open3d as o3d
     # if os.path.exists("reconstruction.ply"):
