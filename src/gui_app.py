@@ -23,10 +23,14 @@ from PIL import Image
 # Add src to path
 sys.path.append(os.path.dirname(__file__))
 
-from enhanced_photogrammetry import EnhancedPhotogrammetryPipeline
-from photogrammetry_v2 import PhotogrammetryPipeline
+try:
+    from enhanced_photogrammetry import EnhancedPhotogrammetryPipeline
+    from photogrammetry_v2 import PhotogrammetryPipeline
+except ImportError as e:
+    print(f"Warning: Some modules could not be imported: {e}")
+    # We'll handle this gracefully in the routes
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='../templates', static_folder='../static')
 app.secret_key = 'photogrammetry_gui_secret_key'
 
 # Configuration

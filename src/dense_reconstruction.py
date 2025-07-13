@@ -348,7 +348,7 @@ class DenseReconstruction:
 
     def tsdf_fusion(self, depth_maps: Dict[int, np.ndarray], poses: Dict[int, CameraPose],
                     images: List[np.ndarray], voxel_size: float = 0.01,
-                    truncation_distance: float = 0.04) -> o3d.geometry.TriangleMesh:
+                    truncation_distance: float = 0.04):
         """
         TSDF (Truncated Signed Distance Function) volume fusion for robust mesh generation
 
@@ -414,7 +414,7 @@ class DenseReconstruction:
         return mesh
 
     def delaunay_triangulation_mesh(self, points_3d: np.ndarray, colors: np.ndarray = None,
-                                   poses: Dict[int, CameraPose] = None) -> o3d.geometry.TriangleMesh:
+                                   poses: Dict[int, CameraPose] = None):
         """
         Generate mesh using Delaunay triangulation with visibility constraints
 
@@ -503,8 +503,8 @@ class DenseReconstruction:
 
         return mesh
 
-    def advanced_mesh_processing(self, mesh: o3d.geometry.TriangleMesh,
-                                iterations: int = 2) -> o3d.geometry.TriangleMesh:
+    def advanced_mesh_processing(self, mesh,
+                                iterations: int = 2):
         """
         Advanced mesh post-processing for high-quality results
 
