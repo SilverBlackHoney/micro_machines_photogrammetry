@@ -3,12 +3,13 @@ run = "python3 src/photogrammetry.py"
 
 [nix]
 channel = "stable-24_05"
+packages = ["cairo", "ffmpeg-full", "freetype", "ghostscript", "gobject-introspection", "gtk3", "lcms2", "libGL", "libGLU", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "pkg-config", "qhull", "tcl", "tk", "xsimd", "zlib"]
 
 [deployment]
 run = ["sh", "-c", "python3 src/photogrammetry.py"]
 
 [workflows]
-runButton = "Run Demo"
+runButton = "Run GUI"
 
 [[workflows.workflow]]
 name = "Run Demo"
