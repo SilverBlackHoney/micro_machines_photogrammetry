@@ -6,3 +6,51 @@ channel = "stable-24_05"
 
 [deployment]
 run = ["sh", "-c", "python3 src/photogrammetry.py"]
+
+[workflows]
+runButton = "Run Demo"
+
+[[workflows.workflow]]
+name = "Run Demo"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 src/demo_dense_reconstruction.py images"
+
+[[workflows.workflow]]
+name = "Run Main"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 main.py"
+
+[[workflows.workflow]]
+name = "Run SfM Only"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 src/photogrammetry_v2.py images"
+
+[[workflows.workflow]]
+name = "Run Dense Demo"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 src/demo_dense_reconstruction.py images"
+
+[[workflows.workflow]]
+name = "Test Reconstruction"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 src/test_reconstruction.py"
