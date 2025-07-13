@@ -64,8 +64,8 @@ class PhotogrammetryPipeline:
         print(f"Loaded {len(self.images)} images")
         return self.images
 
-    def extract_features(self, feature_type='SIFT'):
-        """Extract features from all images"""
+    def extract_features(self, feature_type='ORB', use_cuda=False):
+        """Extract features from all images, optionally using CUDA for ORB."""
         if feature_type == 'SIFT':
             if hasattr(cv2, 'SIFT_create'):
                 detector = cv2.SIFT_create(nfeatures=2000)
@@ -75,8 +75,12 @@ class PhotogrammetryPipeline:
                     "Please install opencv-contrib-python."
                 )
         elif feature_type == 'ORB':
-            if hasattr(cv2, 'ORB_create'):
+            if use_cuda and hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'ORB_create'):
+                detector = cv2.cuda.ORB_create(nfeatures=2000)
+                use_cuda_detector = True
+            elif hasattr(cv2, 'ORB_create'):
                 detector = cv2.ORB_create(nfeatures=2000)
+                use_cuda_detector = False
             else:
                 raise ValueError(
                     "ORB is not available in your OpenCV installation."
@@ -84,13 +88,23 @@ class PhotogrammetryPipeline:
         else:
             raise ValueError(f"Unsupported feature type: {feature_type}")
 
+        self.keypoints = []
+        self.descriptors = []
         for img in self.images:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            kps, descs = detector.detectAndCompute(gray, None)
+            if feature_type == 'ORB' and use_cuda and 'use_cuda_detector' in locals() and use_cuda_detector:
+                gpu_img = cv2.cuda_GpuMat()
+                gpu_img.upload(gray)
+                kps = detector.detect(gpu_img)
+                kps, descs = detector.compute(gpu_img, kps)
+                kps = [cv2.KeyPoint(x.pt[0], x.pt[1], x.size, x.angle, x.response, x.octave, x.class_id) for x in kps]
+                descs = descs.download() if hasattr(descs, 'download') else descs
+            else:
+                kps, descs = detector.detectAndCompute(gray, None)
             self.keypoints.append(kps)
             self.descriptors.append(descs)
 
-        print(f"Extracted features from {len(self.images)} images")
+        print(f"Extracted features from {len(self.images)} images using {feature_type}{' (CUDA)' if feature_type == 'ORB' and use_cuda else ''}")
 
     def match_features(self, ratio_threshold=0.7):
         """Match features between all image pairs"""
@@ -741,35 +755,115 @@ class PhotogrammetryPipeline:
         o3d.io.write_point_cloud(filename, point_cloud)
         print(f"Exported point cloud to {filename}")
 
-    def run_sfm_pipeline(self):
+    def run_sfm_pipeline(self, feature_type='ORB', use_cuda=False):
         """Run the complete SfM pipeline"""
         print("Starting SfM pipeline...")
-        
-        # Step 1: Load images
         self.load_images()
         if len(self.images) < 2:
             raise ValueError("Need at least 2 images for reconstruction")
-        
-        # Step 2: Extract features
-        self.extract_features()
-        
-        # Step 3: Match features
+        self.extract_features(feature_type=feature_type, use_cuda=use_cuda)
         self.match_features()
-        
-        # Step 4: Estimate camera intrinsics
         self.estimate_camera_intrinsics()
-        
-        # Step 5: Initialize two-view reconstruction
         self.initialize_two_view_reconstruction()
-        
-        # Step 6: Bundle adjustment
         self.run_bundle_adjustment()
-        
-        # Step 7: Export results
         self.export_point_cloud("reconstruction.ply")
-        
         print("SfM pipeline completed successfully!")
         return len(self.camera_poses), len(self.point_cloud)
+
+    def add_image_incremental(self, img_path, feature_type='ORB', use_cuda=False):
+        """Add a new image incrementally, extract features, and match to existing images."""
+        img = cv2.imread(img_path)
+        if img is None:
+            raise ValueError(f"Could not read image: {img_path}")
+        self.images.append(img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Feature extraction
+        if feature_type == 'SIFT':
+            if hasattr(cv2, 'SIFT_create'):
+                detector = cv2.SIFT_create(nfeatures=2000)
+            else:
+                raise ValueError("SIFT is not available in your OpenCV installation. Please install opencv-contrib-python.")
+            use_cuda_detector = False
+        elif feature_type == 'ORB':
+            if use_cuda and hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'ORB_create'):
+                detector = cv2.cuda.ORB_create(nfeatures=2000)
+                use_cuda_detector = True
+            elif hasattr(cv2, 'ORB_create'):
+                detector = cv2.ORB_create(nfeatures=2000)
+                use_cuda_detector = False
+            else:
+                raise ValueError("ORB is not available in your OpenCV installation.")
+        else:
+            raise ValueError(f"Unsupported feature type: {feature_type}")
+        if feature_type == 'ORB' and use_cuda and use_cuda_detector:
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(gray)
+            kps = detector.detect(gpu_img)
+            kps, descs = detector.compute(gpu_img, kps)
+            kps = [cv2.KeyPoint(x.pt[0], x.pt[1], x.size, x.angle, x.response, x.octave, x.class_id) for x in kps]
+            descs = descs.download() if hasattr(descs, 'download') else descs
+        else:
+            kps, descs = detector.detectAndCompute(gray, None)
+        self.keypoints.append(kps)
+        self.descriptors.append(descs)
+        # Match to all previous images
+        matcher = cv2.BFMatcher()
+        new_idx = len(self.images) - 1
+        for i in range(new_idx):
+            if self.descriptors[i] is not None and descs is not None:
+                raw_matches = matcher.knnMatch(self.descriptors[i], descs, k=2)
+                good_matches = []
+                for match_pair in raw_matches:
+                    if len(match_pair) == 2:
+                        m, n = match_pair
+                        if m.distance < 0.7 * n.distance:
+                            good_matches.append(m)
+                if len(good_matches) > 20:
+                    self.matches[(i, new_idx)] = good_matches
+        print(f"Added image {img_path} incrementally. Features extracted and matched.")
+
+    def incremental_sfm_update(self):
+        """Update the reconstruction incrementally after adding a new image."""
+        # Find the new image index
+        new_idx = len(self.images) - 1
+        # Find the best match to existing cameras
+        best_score = 0
+        best_pair = None
+        for i in range(new_idx):
+            matches = self.matches.get((i, new_idx), [])
+            if len(matches) > best_score:
+                best_score = len(matches)
+                best_pair = (i, new_idx)
+        if best_pair is None:
+            print("No valid matches for incremental SfM update.")
+            return
+        # Estimate pose for the new image
+        img1_idx, img2_idx = best_pair
+        matches = self.matches[best_pair]
+        pts1 = np.array([self.keypoints[img1_idx][m.queryIdx].pt for m in matches])
+        pts2 = np.array([self.keypoints[img2_idx][m.trainIdx].pt for m in matches])
+        if self.camera_params is None:
+            self.estimate_camera_intrinsics()
+        K = np.array([
+            [self.camera_params.focal_length, 0, self.camera_params.principal_point[0]],
+            [0, self.camera_params.focal_length, self.camera_params.principal_point[1]],
+            [0, 0, 1]
+        ])
+        E, mask = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC)
+        _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K)
+        # Add new camera pose
+        self.camera_poses[img2_idx] = CameraPose(
+            rotation=R,
+            translation=t.flatten(),
+            image_id=img2_idx
+        )
+        # Triangulate new points
+        points_3d = self.triangulate_points(img1_idx, img2_idx, self.camera_poses[img1_idx], self.camera_poses[img2_idx])
+        if points_3d.shape[0] > 0:
+            if not hasattr(self, 'point_cloud') or self.point_cloud is None:
+                self.point_cloud = []
+            self.point_cloud.extend(points_3d.tolist())
+        print(f"Incremental SfM update complete for image {img2_idx}. New points: {points_3d.shape[0]}")
 
     def run_complete_pipeline(self):
         """Run the complete photogrammetry pipeline including dense reconstruction"""
@@ -813,8 +907,10 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Run photogrammetry pipeline')
     parser.add_argument('images_folder', help='Path to folder containing images')
-    parser.add_argument('--feature_type', default='SIFT', choices=['SIFT', 'ORB'],
+    parser.add_argument('--feature_type', default='ORB', choices=['SIFT', 'ORB'],
                         help='Feature detector type')
+    parser.add_argument('--use_cuda', action='store_true',
+                        help='Use CUDA for ORB feature extraction (if available)')
     parser.add_argument('--focal_length', type=float, default=None,
                         help='Initial focal length guess')
     parser.add_argument('--dense', action='store_true',
@@ -839,7 +935,7 @@ if __name__ == "__main__":
             
         else:
             # Run only SfM pipeline
-            n_poses, n_points = pipeline.run_sfm_pipeline()
+            n_poses, n_points = pipeline.run_sfm_pipeline(feature_type=args.feature_type, use_cuda=args.use_cuda)
             print(f"SfM completed: {n_poses} poses, {n_points} sparse points")
             
     except Exception as e:
