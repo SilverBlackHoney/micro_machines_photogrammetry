@@ -1,10 +1,8 @@
 import os
 import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+import unittest
 
 from photogrammetry import PhotogrammetryPipeline
-import unittest
 
 class TestPhotogrammetryPipeline(unittest.TestCase):
     def test_track_reconstruction(self):

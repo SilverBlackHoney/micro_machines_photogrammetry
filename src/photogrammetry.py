@@ -676,6 +676,12 @@ class PhotogrammetryPipeline:
         vertices_to_remove = densities < np.quantile(densities, 0.01)
         mesh.remove_vertices_by_mask(vertices_to_remove)
 
+        # Save mesh
+        o3d.io.write_triangle_mesh(filename, mesh)
+        print(f"Exported mesh to {filename}")
+
+        return mesh
+
     def export_point_cloud(self, filename: str):
         """Export point cloud to PLY format"""
         if self._has_dense_point_cloud():
@@ -714,9 +720,8 @@ class PhotogrammetryPipeline:
 
         # Step 3: Match features
         self.match_features()
-        # Step 6:
-        # Bundle adjustment
-        self.run_bundle_adjustment()
+
+        # Step 4: Estimate camera intrinsics
         self.estimate_camera_intrinsics()
 
         # Step 5: Initialize two-view reconstruction
@@ -728,20 +733,46 @@ class PhotogrammetryPipeline:
         # Step 7: Export results
         self.export_point_cloud("reconstruction.ply")
 
+        # Return number of poses and points
+        n_poses = len(self.camera_poses)
+        n_points = len(self.point_cloud)
+        print(f"SfM completed: {n_poses} poses, {n_points} sparse points")
+        return n_poses, n_points
+
     def run_complete_pipeline(self):
         """Run the complete photogrammetry pipeline including dense reconstruction"""
         print("Starting complete photogrammetry pipeline...")
 
-        # Step 1-6: Basic SfM pipeline
-        self.run_sfm_pipeline()
+        try:
+            # Step 1-6: Basic SfM pipeline
+            n_poses, n_points = self.run_sfm_pipeline()
 
-        # Step 7: Dense reconstruction
-        self.compute_depth_maps()
+            # Step 7: Dense reconstruction
+            self.compute_depth_maps()
 
-        # Step 8: Fuse depth maps
-        self.fuse_depth_maps()
+            # Step 8: Fuse depth maps
+            dense_points = self.fuse_depth_maps()
 
-        return mesh, (self.dense_point_cloud if hasattr(self, 'dense_point_cloud') else None)
+            # Step 9: Generate mesh (optional)
+            mesh = None
+            if hasattr(self, 'dense_point_cloud') and len(self.dense_point_cloud) > 0:
+                try:
+                    mesh = self.generate_mesh("race_track_mesh.ply")
+                    if mesh is not None:
+                        print(f"Generated mesh with {len(mesh.vertices)} vertices")
+                except Exception as e:
+                    print(f"Mesh generation failed: {e}")
+
+            # Step 10: Export dense point cloud
+            if hasattr(self, 'dense_point_cloud') and len(self.dense_point_cloud) > 0:
+                self.export_point_cloud("race_track_dense.ply")
+                print(f"Generated dense point cloud with {len(self.dense_point_cloud)} points")
+
+            return mesh, (self.dense_point_cloud if hasattr(self, 'dense_point_cloud') else None)
+
+        except Exception as e:
+            print(f"Pipeline failed: {e}")
+            return None, None
 
 
 # Usage example for micro machines race track
