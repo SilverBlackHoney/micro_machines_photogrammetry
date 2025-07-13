@@ -54,3 +54,12 @@ mode = "sequential"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python3 src/test_reconstruction.py"
+
+[[workflows.workflow]]
+name = "Run GUI"
+author = 44981807
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 src/gui_app.py"

@@ -1,0 +1,286 @@
+
+{% extends "base.html" %}
+
+{% block title %}Upload Images - Photogrammetry Pipeline{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2><i class="fas fa-upload text-primary"></i> Upload Images for Reconstruction</h2>
+        <p class="text-muted">Upload 2+ overlapping images of your object or scene. Ensure good overlap (30-70%) between consecutive images.</p>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-body">
+                <div id="drop-zone" class="drop-zone text-center p-5 border border-2 border-dashed rounded">
+                    <i class="fas fa-cloud-upload-alt fa-4x text-muted mb-3"></i>
+                    <h4>Drag and drop images here</h4>
+                    <p class="text-muted">or click to select files</p>
+                    <input type="file" id="file-input" multiple accept="image/*" class="d-none">
+                    <button type="button" class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+                        <i class="fas fa-folder-open"></i> Choose Files
+                    </button>
+                </div>
+                
+                <div id="upload-progress" class="mt-3" style="display: none;">
+                    <div class="progress">
+                        <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%"></div>
+                    </div>
+                    <small class="text-muted">Uploading files...</small>
+                </div>
+                
+                <div id="file-list" class="mt-3"></div>
+                
+                <div id="upload-actions" class="mt-3" style="display: none;">
+                    <button id="start-reconstruction" class="btn btn-success btn-lg">
+                        <i class="fas fa-play"></i> Start Reconstruction
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h6><i class="fas fa-info-circle"></i> Upload Guidelines</h6>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <h6 class="text-success"><i class="fas fa-check"></i> Good Practices:</h6>
+                    <ul class="small">
+                        <li>Take 5-20 photos from different angles</li>
+                        <li>Ensure 30-70% overlap between images</li>
+                        <li>Use consistent lighting</li>
+                        <li>Keep the object in frame</li>
+                        <li>Use steady hands or tripod</li>
+                    </ul>
+                </div>
+                
+                <div class="mb-3">
+                    <h6 class="text-danger"><i class="fas fa-times"></i> Avoid:</h6>
+                    <ul class="small">
+                        <li>Blurry or dark photos</li>
+                        <li>Completely different lighting</li>
+                        <li>Large gaps in coverage</li>
+                        <li>Motion blur</li>
+                    </ul>
+                </div>
+                
+                <div class="alert alert-info small">
+                    <i class="fas fa-lightbulb"></i>
+                    <strong>Tip:</strong> Walk around your object taking photos every 15-30 degrees for best results.
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6><i class="fas fa-cog"></i> Reconstruction Options</h6>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Depth Method:</label>
+                    <select id="depth-method" class="form-select form-select-sm">
+                        <option value="patchmatch">PatchMatch (High Quality)</option>
+                        <option value="sgm">Semi-Global Matching (Fast)</option>
+                    </select>
+                    <small class="text-muted">PatchMatch provides better quality but takes longer</small>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Meshing Method:</label>
+                    <select id="meshing-method" class="form-select form-select-sm">
+                        <option value="tsdf">TSDF Fusion (Watertight)</option>
+                        <option value="poisson">Poisson (Smooth)</option>
+                        <option value="delaunay">Delaunay (Fast)</option>
+                    </select>
+                    <small class="text-muted">TSDF creates watertight meshes, Poisson creates smooth surfaces</small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let selectedFiles = [];
+let currentSessionId = null;
+
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const fileList = document.getElementById('file-list');
+const uploadProgress = document.getElementById('upload-progress');
+const progressBar = document.getElementById('progress-bar');
+const uploadActions = document.getElementById('upload-actions');
+
+// Drag and drop handlers
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('border-primary', 'bg-light');
+});
+
+dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('border-primary', 'bg-light');
+});
+
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('border-primary', 'bg-light');
+    
+    const files = Array.from(e.dataTransfer.files);
+    handleFiles(files);
+});
+
+// File input handler
+fileInput.addEventListener('change', (e) => {
+    const files = Array.from(e.target.files);
+    handleFiles(files);
+});
+
+function handleFiles(files) {
+    const imageFiles = files.filter(file => file.type.startsWith('image/'));
+    
+    if (imageFiles.length === 0) {
+        alert('Please select valid image files.');
+        return;
+    }
+    
+    selectedFiles = imageFiles;
+    displayFileList();
+    uploadFiles();
+}
+
+function displayFileList() {
+    if (selectedFiles.length === 0) {
+        fileList.innerHTML = '';
+        return;
+    }
+    
+    const filesHtml = selectedFiles.map((file, index) => `
+        <div class="d-flex align-items-center justify-content-between p-2 border rounded mb-2">
+            <div class="d-flex align-items-center">
+                <i class="fas fa-image text-primary me-2"></i>
+                <div>
+                    <div class="fw-medium">${file.name}</div>
+                    <small class="text-muted">${(file.size / 1024 / 1024).toFixed(2)} MB</small>
+                </div>
+            </div>
+            <button class="btn btn-sm btn-outline-danger" onclick="removeFile(${index})">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `).join('');
+    
+    fileList.innerHTML = `
+        <h6><i class="fas fa-list"></i> Selected Files (${selectedFiles.length})</h6>
+        ${filesHtml}
+    `;
+}
+
+function removeFile(index) {
+    selectedFiles.splice(index, 1);
+    displayFileList();
+    
+    if (selectedFiles.length === 0) {
+        uploadActions.style.display = 'none';
+    }
+}
+
+function uploadFiles() {
+    if (selectedFiles.length === 0) return;
+    
+    uploadProgress.style.display = 'block';
+    
+    const formData = new FormData();
+    selectedFiles.forEach(file => {
+        formData.append('files', file);
+    });
+    
+    fetch('/api/upload', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.session_id) {
+            currentSessionId = data.session_id;
+            uploadProgress.style.display = 'none';
+            uploadActions.style.display = 'block';
+            
+            // Show success message
+            const successAlert = document.createElement('div');
+            successAlert.className = 'alert alert-success';
+            successAlert.innerHTML = `
+                <i class="fas fa-check-circle"></i>
+                Successfully uploaded ${data.uploaded_files} images!
+            `;
+            fileList.appendChild(successAlert);
+        } else {
+            throw new Error(data.error || 'Upload failed');
+        }
+    })
+    .catch(error => {
+        console.error('Upload error:', error);
+        uploadProgress.style.display = 'none';
+        
+        const errorAlert = document.createElement('div');
+        errorAlert.className = 'alert alert-danger';
+        errorAlert.innerHTML = `
+            <i class="fas fa-exclamation-triangle"></i>
+            Upload failed: ${error.message}
+        `;
+        fileList.appendChild(errorAlert);
+    });
+}
+
+document.getElementById('start-reconstruction').addEventListener('click', () => {
+    if (!currentSessionId) {
+        alert('Please upload images first.');
+        return;
+    }
+    
+    const depthMethod = document.getElementById('depth-method').value;
+    const meshingMethod = document.getElementById('meshing-method').value;
+    
+    fetch('/api/start_reconstruction', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            session_id: currentSessionId,
+            method: depthMethod,
+            meshing_method: meshingMethod
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        // Redirect to session page
+        window.location.href = `/session/${currentSessionId}`;
+    })
+    .catch(error => {
+        console.error('Reconstruction start error:', error);
+        alert('Failed to start reconstruction. Please try again.');
+    });
+});
+</script>
+
+<style>
+.drop-zone {
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.drop-zone:hover {
+    border-color: var(--bs-primary) !important;
+    background-color: var(--bs-light) !important;
+}
+
+.drop-zone.border-primary {
+    background-color: var(--bs-light) !important;
+}
+</style>
+{% endblock %}

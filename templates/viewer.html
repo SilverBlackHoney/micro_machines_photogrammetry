@@ -1,0 +1,479 @@
+
+{% extends "base.html" %}
+
+{% block title %}3D Viewer - Session {{ session_id[:8] }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2><i class="fas fa-eye text-primary"></i> 3D Reconstruction Viewer</h2>
+            <div>
+                <button class="btn btn-outline-secondary me-2" onclick="resetCamera()">
+                    <i class="fas fa-home"></i> Reset View
+                </button>
+                <a href="/session/{{ session_id }}" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left"></i> Back to Session
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-lg-9">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-cube"></i> 3D Reconstruction</h5>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" onclick="toggleWireframe()">
+                        <i class="fas fa-project-diagram"></i> Wireframe
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="togglePoints()">
+                        <i class="fas fa-dot-circle"></i> Points
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="captureScreenshot()">
+                        <i class="fas fa-camera"></i> Screenshot
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div id="viewer-container" style="height: 600px; background: #f8f9fa;">
+                    <div id="loading-message" class="d-flex align-items-center justify-content-center h-100">
+                        <div class="text-center">
+                            <div class="spinner-border text-primary mb-3" role="status"></div>
+                            <h5>Loading 3D Model...</h5>
+                            <p class="text-muted">Please wait while we load your reconstruction</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Viewer Controls -->
+        <div class="card mt-3">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-md-4">
+                        <h6 class="mb-0"><i class="fas fa-mouse"></i> Mouse Controls</h6>
+                        <small class="text-muted">
+                            Left: Rotate • Right: Pan • Wheel: Zoom
+                        </small>
+                    </div>
+                    <div class="col-md-4">
+                        <h6 class="mb-0"><i class="fas fa-palette"></i> Rendering</h6>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="show-axes" checked onchange="toggleAxes()">
+                            <label class="form-check-label" for="show-axes">Axes</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="show-grid" checked onchange="toggleGrid()">
+                            <label class="form-check-label" for="show-grid">Grid</label>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <h6 class="mb-0"><i class="fas fa-info-circle"></i> Model Info</h6>
+                        <div id="model-info">
+                            <small class="text-muted">No model loaded</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-3">
+        <!-- File Selector -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6><i class="fas fa-folder-open"></i> Available Files</h6>
+            </div>
+            <div class="card-body">
+                <div id="file-selector">
+                    <div class="text-center py-3">
+                        <div class="spinner-border spinner-border-sm" role="status"></div>
+                        <p class="small text-muted mt-2">Loading files...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- View Presets -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6><i class="fas fa-camera"></i> View Presets</h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('front')">
+                        <i class="fas fa-eye"></i> Front View
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('back')">
+                        <i class="fas fa-eye"></i> Back View
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('top')">
+                        <i class="fas fa-eye"></i> Top View
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('bottom')">
+                        <i class="fas fa-eye"></i> Bottom View
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('left')">
+                        <i class="fas fa-eye"></i> Left View
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="setView('right')">
+                        <i class="fas fa-eye"></i> Right View
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Lighting Controls -->
+        <div class="card">
+            <div class="card-header">
+                <h6><i class="fas fa-sun"></i> Lighting</h6>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label small">Ambient Light:</label>
+                    <input type="range" class="form-range" id="ambient-light" min="0" max="1" step="0.1" value="0.4" onchange="updateLighting()">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small">Directional Light:</label>
+                    <input type="range" class="form-range" id="directional-light" min="0" max="2" step="0.1" value="1" onchange="updateLighting()">
+                </div>
+                <button class="btn btn-sm btn-outline-secondary w-100" onclick="resetLighting()">
+                    <i class="fas fa-undo"></i> Reset Lighting
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const sessionId = '{{ session_id }}';
+let scene, camera, renderer, controls;
+let currentMesh = null;
+let axes, grid;
+let ambientLight, directionalLight;
+
+function initViewer() {
+    const container = document.getElementById('viewer-container');
+    const loadingMessage = document.getElementById('loading-message');
+    
+    // Scene setup
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf8f9fa);
+    
+    // Camera setup
+    camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
+    camera.position.set(5, 5, 5);
+    
+    // Renderer setup
+    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    
+    // Controls
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    
+    // Lighting
+    ambientLight = new THREE.AmbientLight(0x404040, 0.4);
+    scene.add(ambientLight);
+    
+    directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(10, 10, 5);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+    
+    // Axes helper
+    axes = new THREE.AxesHelper(2);
+    scene.add(axes);
+    
+    // Grid helper
+    grid = new THREE.GridHelper(10, 10);
+    scene.add(grid);
+    
+    // Add renderer to DOM
+    container.appendChild(renderer.domElement);
+    loadingMessage.style.display = 'none';
+    
+    // Handle window resize
+    window.addEventListener('resize', onWindowResize);
+    
+    // Start animation loop
+    animate();
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+function onWindowResize() {
+    const container = document.getElementById('viewer-container');
+    camera.aspect = container.clientWidth / container.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(container.clientWidth, container.clientHeight);
+}
+
+function loadPLYFile(url, filename) {
+    const loader = new THREE.PLYLoader();
+    
+    // Remove existing mesh
+    if (currentMesh) {
+        scene.remove(currentMesh);
+    }
+    
+    // Show loading
+    const loadingMessage = document.getElementById('loading-message');
+    loadingMessage.style.display = 'flex';
+    loadingMessage.innerHTML = `
+        <div class="text-center">
+            <div class="spinner-border text-primary mb-3" role="status"></div>
+            <h5>Loading ${filename}...</h5>
+            <p class="text-muted">Please wait...</p>
+        </div>
+    `;
+    
+    loader.load(url, (geometry) => {
+        loadingMessage.style.display = 'none';
+        
+        // Compute geometry properties
+        geometry.computeBoundingBox();
+        geometry.computeVertexNormals();
+        
+        // Create material
+        const material = new THREE.MeshPhongMaterial({
+            color: 0x00ff00,
+            vertexColors: geometry.hasAttribute('color'),
+            shininess: 30
+        });
+        
+        // Create mesh
+        currentMesh = new THREE.Mesh(geometry, material);
+        currentMesh.castShadow = true;
+        currentMesh.receiveShadow = true;
+        
+        scene.add(currentMesh);
+        
+        // Center camera on model
+        const box = geometry.boundingBox;
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        
+        // Update camera position
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const distance = maxDim * 2;
+        
+        camera.position.set(center.x + distance, center.y + distance, center.z + distance);
+        controls.target.copy(center);
+        controls.update();
+        
+        // Update model info
+        updateModelInfo(geometry);
+        
+    }, (progress) => {
+        const percent = Math.round((progress.loaded / progress.total) * 100);
+        loadingMessage.innerHTML = `
+            <div class="text-center">
+                <div class="progress mb-3" style="width: 200px;">
+                    <div class="progress-bar" style="width: ${percent}%"></div>
+                </div>
+                <h5>Loading ${filename}...</h5>
+                <p class="text-muted">${percent}% complete</p>
+            </div>
+        `;
+    }, (error) => {
+        loadingMessage.style.display = 'none';
+        console.error('Error loading PLY file:', error);
+        alert('Failed to load 3D model. Please try again.');
+    });
+}
+
+function updateModelInfo(geometry) {
+    const vertices = geometry.attributes.position.count;
+    const faces = geometry.index ? geometry.index.count / 3 : vertices / 3;
+    
+    document.getElementById('model-info').innerHTML = `
+        <small class="text-muted">
+            ${vertices.toLocaleString()} vertices<br>
+            ${Math.floor(faces).toLocaleString()} faces
+        </small>
+    `;
+}
+
+function loadFiles() {
+    fetch(`/api/reconstruction_files/${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            const fileSelector = document.getElementById('file-selector');
+            
+            if (data.files.length === 0) {
+                fileSelector.innerHTML = `
+                    <div class="text-center py-3 text-muted">
+                        <i class="fas fa-folder-open"></i>
+                        <p class="small mb-0">No files available</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const plyFiles = data.files.filter(file => file.filename.endsWith('.ply'));
+            
+            if (plyFiles.length === 0) {
+                fileSelector.innerHTML = `
+                    <div class="text-center py-3 text-muted">
+                        <i class="fas fa-cube"></i>
+                        <p class="small mb-0">No 3D models available</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const filesHtml = plyFiles.map(file => `
+                <button class="btn btn-outline-primary btn-sm mb-2 w-100 text-start" 
+                        onclick="loadPLYFile('${file.download_url}', '${file.filename}')">
+                    <i class="fas fa-cube me-2"></i>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span class="text-truncate">${file.filename}</span>
+                        <small class="text-muted">${file.size_mb}MB</small>
+                    </div>
+                </button>
+            `).join('');
+            
+            fileSelector.innerHTML = filesHtml;
+            
+            // Auto-load first PLY file
+            if (plyFiles.length > 0) {
+                loadPLYFile(plyFiles[0].download_url, plyFiles[0].filename);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading files:', error);
+            document.getElementById('file-selector').innerHTML = `
+                <div class="alert alert-danger small">
+                    Error loading files
+                </div>
+            `;
+        });
+}
+
+// Control functions
+function resetCamera() {
+    if (currentMesh) {
+        const geometry = currentMesh.geometry;
+        const box = geometry.boundingBox;
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const distance = maxDim * 2;
+        
+        camera.position.set(center.x + distance, center.y + distance, center.z + distance);
+        controls.target.copy(center);
+        controls.update();
+    }
+}
+
+function toggleWireframe() {
+    if (currentMesh) {
+        currentMesh.material.wireframe = !currentMesh.material.wireframe;
+    }
+}
+
+function togglePoints() {
+    if (currentMesh) {
+        const isPoints = currentMesh.material.type === 'PointsMaterial';
+        
+        if (isPoints) {
+            // Switch back to mesh
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x00ff00,
+                vertexColors: currentMesh.geometry.hasAttribute('color'),
+                shininess: 30
+            });
+            const newMesh = new THREE.Mesh(currentMesh.geometry, material);
+            scene.remove(currentMesh);
+            scene.add(newMesh);
+            currentMesh = newMesh;
+        } else {
+            // Switch to points
+            const material = new THREE.PointsMaterial({
+                size: 0.01,
+                vertexColors: currentMesh.geometry.hasAttribute('color')
+            });
+            const points = new THREE.Points(currentMesh.geometry, material);
+            scene.remove(currentMesh);
+            scene.add(points);
+            currentMesh = points;
+        }
+    }
+}
+
+function toggleAxes() {
+    axes.visible = document.getElementById('show-axes').checked;
+}
+
+function toggleGrid() {
+    grid.visible = document.getElementById('show-grid').checked;
+}
+
+function setView(view) {
+    if (!currentMesh) return;
+    
+    const geometry = currentMesh.geometry;
+    const box = geometry.boundingBox;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const distance = maxDim * 2;
+    
+    const positions = {
+        'front': [center.x, center.y, center.z + distance],
+        'back': [center.x, center.y, center.z - distance],
+        'top': [center.x, center.y + distance, center.z],
+        'bottom': [center.x, center.y - distance, center.z],
+        'left': [center.x - distance, center.y, center.z],
+        'right': [center.x + distance, center.y, center.z]
+    };
+    
+    const pos = positions[view];
+    camera.position.set(...pos);
+    controls.target.copy(center);
+    controls.update();
+}
+
+function updateLighting() {
+    const ambientValue = document.getElementById('ambient-light').value;
+    const directionalValue = document.getElementById('directional-light').value;
+    
+    ambientLight.intensity = parseFloat(ambientValue);
+    directionalLight.intensity = parseFloat(directionalValue);
+}
+
+function resetLighting() {
+    document.getElementById('ambient-light').value = 0.4;
+    document.getElementById('directional-light').value = 1;
+    updateLighting();
+}
+
+function captureScreenshot() {
+    renderer.render(scene, camera);
+    const dataURL = renderer.domElement.toDataURL('image/png');
+    
+    const link = document.createElement('a');
+    link.download = `reconstruction_screenshot_${new Date().getTime()}.png`;
+    link.href = dataURL;
+    link.click();
+}
+
+// Initialize viewer on page load
+document.addEventListener('DOMContentLoaded', () => {
+    initViewer();
+    loadFiles();
+});
+</script>
+{% endblock %}

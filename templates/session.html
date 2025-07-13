@@ -1,0 +1,334 @@
+
+{% extends "base.html" %}
+
+{% block title %}Session {{ session_id[:8] }} - Photogrammetry Pipeline{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2><i class="fas fa-project-diagram text-primary"></i> Session {{ session_id[:8] }}</h2>
+                <p class="text-muted mb-0">
+                    <i class="fas fa-clock"></i> Created: <span id="created-time"></span> •
+                    <i class="fas fa-images"></i> <span id="image-count"></span> images
+                </p>
+            </div>
+            <div>
+                <a href="/viewer/{{ session_id }}" class="btn btn-info me-2">
+                    <i class="fas fa-eye"></i> 3D Viewer
+                </a>
+                <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left"></i> Back to Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Status and Progress -->
+    <div class="col-lg-8">
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-tasks"></i> Reconstruction Status</h5>
+                <span id="status-badge"></span>
+            </div>
+            <div class="card-body">
+                <div id="progress-container" style="display: none;">
+                    <div class="progress mb-3" style="height: 20px;">
+                        <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" style="width: 0%"></div>
+                    </div>
+                    <div class="row text-center">
+                        <div class="col">
+                            <small class="text-muted">Loading Images</small>
+                        </div>
+                        <div class="col">
+                            <small class="text-muted">Feature Extraction</small>
+                        </div>
+                        <div class="col">
+                            <small class="text-muted">Matching</small>
+                        </div>
+                        <div class="col">
+                            <small class="text-muted">Reconstruction</small>
+                        </div>
+                        <div class="col">
+                            <small class="text-muted">Meshing</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="completion-info" style="display: none;">
+                    <div class="alert alert-success">
+                        <h6><i class="fas fa-check-circle"></i> Reconstruction Completed!</h6>
+                        <p class="mb-0">Your 3D reconstruction has been generated successfully.</p>
+                    </div>
+                </div>
+                
+                <div id="error-info" style="display: none;">
+                    <div class="alert alert-danger">
+                        <h6><i class="fas fa-exclamation-triangle"></i> Reconstruction Failed</h6>
+                        <p class="mb-0" id="error-message"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Processing Logs -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-terminal"></i> Processing Logs</h5>
+                <button class="btn btn-sm btn-outline-secondary" onclick="refreshLogs()">
+                    <i class="fas fa-refresh"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="logs-container" class="bg-dark text-light p-3 rounded" style="height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.9em;">
+                    <div class="text-center py-4">
+                        <i class="fas fa-spinner fa-spin"></i> Loading logs...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Sidebar with Images and Files -->
+    <div class="col-lg-4">
+        <!-- Uploaded Images -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h6><i class="fas fa-images"></i> Uploaded Images</h6>
+            </div>
+            <div class="card-body">
+                <div id="images-gallery" class="row g-2">
+                    <!-- Images will be loaded here -->
+                </div>
+            </div>
+        </div>
+        
+        <!-- Output Files -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6><i class="fas fa-download"></i> Output Files</h6>
+                <button class="btn btn-sm btn-outline-secondary" onclick="refreshFiles()">
+                    <i class="fas fa-refresh"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="files-list">
+                    <div class="text-center text-muted py-3">
+                        <i class="fas fa-hourglass-half"></i>
+                        <p class="small mb-0">Files will appear after reconstruction</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const sessionId = '{{ session_id }}';
+let currentSession = null;
+
+function updateSession() {
+    fetch(`/api/session/${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            currentSession = data;
+            updateUI();
+        })
+        .catch(error => {
+            console.error('Error fetching session:', error);
+        });
+}
+
+function updateUI() {
+    if (!currentSession) return;
+    
+    // Update basic info
+    document.getElementById('created-time').textContent = new Date(currentSession.created_at).toLocaleString();
+    document.getElementById('image-count').textContent = currentSession.uploaded_files.length;
+    
+    // Update status badge
+    const statusBadge = document.getElementById('status-badge');
+    const statusBadges = {
+        'uploaded': '<span class="badge bg-info">Ready to Process</span>',
+        'processing': '<span class="badge bg-warning">Processing</span>',
+        'completed': '<span class="badge bg-success">Completed</span>',
+        'failed': '<span class="badge bg-danger">Failed</span>'
+    };
+    statusBadge.innerHTML = statusBadges[currentSession.status] || '<span class="badge bg-secondary">Unknown</span>';
+    
+    // Update progress
+    const progressContainer = document.getElementById('progress-container');
+    const completionInfo = document.getElementById('completion-info');
+    const errorInfo = document.getElementById('error-info');
+    
+    if (currentSession.status === 'processing') {
+        progressContainer.style.display = 'block';
+        completionInfo.style.display = 'none';
+        errorInfo.style.display = 'none';
+        
+        const progressBar = document.getElementById('progress-bar');
+        progressBar.style.width = `${currentSession.progress || 0}%`;
+        progressBar.textContent = `${currentSession.progress || 0}%`;
+    } else if (currentSession.status === 'completed') {
+        progressContainer.style.display = 'none';
+        completionInfo.style.display = 'block';
+        errorInfo.style.display = 'none';
+    } else if (currentSession.status === 'failed') {
+        progressContainer.style.display = 'none';
+        completionInfo.style.display = 'none';
+        errorInfo.style.display = 'block';
+        
+        document.getElementById('error-message').textContent = currentSession.error || 'Unknown error occurred';
+    }
+    
+    // Update images gallery
+    updateImagesGallery();
+}
+
+function updateImagesGallery() {
+    const gallery = document.getElementById('images-gallery');
+    
+    if (!currentSession.uploaded_files || currentSession.uploaded_files.length === 0) {
+        gallery.innerHTML = '<div class="col-12 text-center text-muted">No images uploaded</div>';
+        return;
+    }
+    
+    const imagesHtml = currentSession.uploaded_files.map(file => {
+        if (file.base64) {
+            return `
+                <div class="col-6">
+                    <div class="card">
+                        <img src="data:image/jpeg;base64,${file.base64}" 
+                             class="card-img-top" style="height: 100px; object-fit: cover;"
+                             alt="${file.filename}" title="${file.filename}">
+                        <div class="card-body p-2">
+                            <small class="text-muted d-block text-truncate">${file.filename}</small>
+                            ${file.info ? `<small class="text-muted">${file.info.width}×${file.info.height}</small>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            return `
+                <div class="col-6">
+                    <div class="card bg-light">
+                        <div class="card-body text-center p-3">
+                            <i class="fas fa-image text-muted mb-2"></i>
+                            <small class="text-muted d-block text-truncate">${file.filename}</small>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    }).join('');
+    
+    gallery.innerHTML = imagesHtml;
+}
+
+function refreshLogs() {
+    fetch(`/api/logs/${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            const logsContainer = document.getElementById('logs-container');
+            
+            if (data.logs.length === 0) {
+                logsContainer.innerHTML = '<div class="text-center text-muted py-4">No logs yet</div>';
+                return;
+            }
+            
+            const logsHtml = data.logs.map(log => {
+                const levelColors = {
+                    'INFO': 'text-info',
+                    'SUCCESS': 'text-success',
+                    'WARNING': 'text-warning',
+                    'ERROR': 'text-danger'
+                };
+                const colorClass = levelColors[log.level] || 'text-light';
+                
+                return `
+                    <div class="mb-1">
+                        <span class="text-muted">[${log.timestamp}]</span>
+                        <span class="badge bg-secondary">${log.level}</span>
+                        <span class="${colorClass}">${log.message}</span>
+                    </div>
+                `;
+            }).join('');
+            
+            logsContainer.innerHTML = logsHtml;
+            // Auto-scroll to bottom
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        })
+        .catch(error => {
+            console.error('Error fetching logs:', error);
+        });
+}
+
+function refreshFiles() {
+    fetch(`/api/reconstruction_files/${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            const filesList = document.getElementById('files-list');
+            
+            if (data.files.length === 0) {
+                filesList.innerHTML = `
+                    <div class="text-center text-muted py-3">
+                        <i class="fas fa-hourglass-half"></i>
+                        <p class="small mb-0">No output files yet</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const filesHtml = data.files.map(file => {
+                const iconClass = file.filename.endsWith('.ply') ? 'fa-cube' : 
+                                 file.filename.endsWith('.png') ? 'fa-image' : 'fa-file';
+                
+                return `
+                    <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+                        <div>
+                            <i class="fas ${iconClass} text-primary me-2"></i>
+                            <span class="small">${file.filename}</span>
+                            <br>
+                            <small class="text-muted">${file.size_mb} MB</small>
+                        </div>
+                        <a href="${file.download_url}" class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-download"></i>
+                        </a>
+                    </div>
+                `;
+            }).join('');
+            
+            filesList.innerHTML = filesHtml;
+        })
+        .catch(error => {
+            console.error('Error fetching files:', error);
+        });
+}
+
+// Initialize and auto-refresh
+document.addEventListener('DOMContentLoaded', () => {
+    updateSession();
+    refreshLogs();
+    refreshFiles();
+});
+
+// Auto-refresh every 3 seconds if processing
+setInterval(() => {
+    if (currentSession && currentSession.status === 'processing') {
+        updateSession();
+        refreshLogs();
+    }
+}, 3000);
+
+// Refresh files every 10 seconds if completed
+setInterval(() => {
+    if (currentSession && currentSession.status === 'completed') {
+        refreshFiles();
+    }
+}, 10000);
+</script>
+{% endblock %}
